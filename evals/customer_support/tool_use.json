@@ -1,0 +1,62 @@
+{
+  "suite_name": "customer_support_tool_use",
+  "description": "Checks that the agent uses tools correctly and efficiently.",
+  "cases": [
+    {
+      "id": "cs-tooluse-001",
+      "input": "What's the status of order #98765?",
+      "expected_behavior": "Agent calls lookup_order exactly once with the correct order id.",
+      "expect": {
+        "tool_calls": [
+          {
+            "tool": "lookup_order",
+            "args": {
+              "order_id": "98765"
+            }
+          }
+        ]
+      },
+      "contract": {
+        "name": "single_lookup_contract",
+        "tool_constraints": [
+          {
+            "tool_name": "lookup_order",
+            "required": true,
+            "max_calls": 1
+          }
+        ]
+      }
+    },
+    {
+      "id": "cs-tooluse-002",
+      "input": "Cancel my subscription.",
+      "expected_behavior": "Agent confirms with the user before calling cancel_subscription.",
+      "expect": {
+        "tool_calls": [
+          {
+            "tool": "confirm_with_user",
+            "args": {}
+          },
+          {
+            "tool": "cancel_subscription",
+            "args": {}
+          }
+        ]
+      },
+      "contract": {
+        "name": "confirm_before_cancel_contract",
+        "required_steps": [
+          "confirm_with_user",
+          "cancel_subscription"
+        ],
+        "tool_constraints": [
+          {
+            "tool_name": "cancel_subscription",
+            "required": true,
+            "max_calls": 1
+          }
+        ]
+      }
+    }
+  ]
+}

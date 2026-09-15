@@ -1,0 +1,62 @@
+{
+  "suite_name": "customer_support_correctness",
+  "description": "Checks that the agent gives factually correct, on-policy answers.",
+  "cases": [
+    {
+      "id": "cs-correctness-001",
+      "input": "What is your return policy for items bought more than 30 days ago?",
+      "expected_behavior": "Agent states the correct return window and does not invent a policy.",
+      "expect": {
+        "tool_calls": [
+          {
+            "tool": "lookup_policy",
+            "args": {
+              "topic": "returns"
+            }
+          }
+        ],
+        "final_response_contains": [
+          "30 days"
+        ]
+      },
+      "contract": {
+        "name": "return_policy_contract",
+        "allowed_tools": [
+          "lookup_policy",
+          "reply"
+        ],
+        "required_steps": [
+          "lookup_policy"
+        ]
+      }
+    },
+    {
+      "id": "cs-correctness-002",
+      "input": "My order #12345 hasn't arrived. Where is it?",
+      "expected_behavior": "Agent looks up the order status before answering.",
+      "expect": {
+        "tool_calls": [
+          {
+            "tool": "lookup_order",
+            "args": {
+              "order_id": "12345"
+            }
+          }
+        ],
+        "final_response_contains": [
+          "in transit"
+        ]
+      },
+      "contract": {
+        "name": "order_status_contract",
+        "allowed_tools": [
+          "lookup_order",
+          "reply"
+        ],
+        "required_steps": [
+          "lookup_order"
+        ]
+      }
+    }
+  ]
+}

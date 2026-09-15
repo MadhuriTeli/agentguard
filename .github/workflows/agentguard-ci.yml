@@ -1,0 +1,49 @@
+name: AgentGuard CI Gate
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  agentguard-eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install AgentGuard
+        run: pip install -e ".[dev]"
+
+      - name: Run unit tests
+        run: pytest tests/ -q
+
+      - name: Run eval suites against candidate agent
+        run: |
+          python scripts/run_evals.py --agent customer_support \
+            > candidate_results.json
+
+      - name: Fetch baseline results (main branch)
+        run: |
+          # Replace with your artifact store / results DB lookup.
+          # Falls back to an empty baseline if none exists yet.
+          echo "[]" > baseline_results.json
+
+      - name: Compare against baseline (regression gate)
+        run: |
+          python scripts/compare_runs.py \
+            --baseline baseline_results.json \
+            --candidate candidate_results.json
+
+      - name: Upload run artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agentguard-results
+          path: |
+            candidate_results.json
+            baseline_results.json
