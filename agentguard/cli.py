@@ -1,4 +1,5 @@
 """Command-line interface for AgentGuard."""
+
 # ruff: noqa: B008
 from __future__ import annotations
 
@@ -19,19 +20,38 @@ app = typer.Typer(help="AgentGuard: testing and chaos engineering for AI agents"
 console = Console()
 
 
-def _load_agent(dotted_path: str) -> Any:
-    """Load an agent class/instance from a 'module.submodule:ClassName' path."""
+def _load_agent_factory(dotted_path: str) -> Any:
+    """Load an agent from a 'module.submodule:ClassName' path, returning a
+    zero-arg factory so each eval case gets a fresh, state-free instance.
+    """
     module_path, _, attr = dotted_path.partition(":")
     module = importlib.import_module(module_path)
     obj = getattr(module, attr)
-    return obj() if isinstance(obj, type) else obj
+    return obj if isinstance(obj, type) else (lambda: obj)
+
+
+def _load_tools(dotted_path: str | None) -> dict[str, Any]:
+    """Load a tool-name -> callable mapping from a 'module.submodule:DICT_NAME' path."""
+    tools: dict[str, Any] = {"reply": lambda **kwargs: kwargs}
+    if not dotted_path:
+        return tools
+    module_path, _, attr = dotted_path.partition(":")
+    module = importlib.import_module(module_path)
+    tools.update(getattr(module, attr))
+    return tools
 
 
 @app.command()
 def run(
     eval_suite: Path = typer.Argument(..., help="Path to an eval suite JSON file"),
     agent: str = typer.Option(
-        ..., help="Dotted path to an agent, e.g. 'agents.customer_support.agent:CustomerSupportAgent'"
+        ...,
+        help="Dotted path to an agent, e.g. 'agents.customer_support.agent:CustomerSupportAgent'",
+    ),
+    tools: str | None = typer.Option(
+        None,
+        help="Dotted path to a tools dict, e.g. 'agents.customer_support.tools:TOOLS'. "
+        "A no-op 'reply' tool is always available even if omitted.",
     ),
 ):
     """Run every case in an eval suite through the Harness and report PASS/FAIL."""
@@ -42,14 +62,8 @@ def run(
         f"for agent '{agent}'."
     )
 
-    agent_obj = _load_agent(agent)
-
-    # A no-op "reply" tool so the shipped example agent (which only emits
-    # {"tool": "reply", ...}) can run end-to-end. Real agents with real
-    # tools (lookup_order, issue_refund, etc.) need those passed in here —
-    # this CLI command doesn't yet have a way to load tool implementations
-    # from the eval suite, only the agent and its contract.
-    default_tools = {"reply": lambda **kwargs: kwargs}
+    agent_factory = _load_agent_factory(agent)
+    default_tools = _load_tools(tools)
 
     table = Table(title=f"AgentGuard — {suite.get('suite_name', eval_suite.stem)}")
     table.add_column("Case")
@@ -59,7 +73,9 @@ def run(
     all_passed = True
     for case in cases:
         contract = Contract(**case["contract"]) if "contract" in case else None
-        harness = Harness(agent=agent_obj, tools=default_tools, contract=contract)
+        # Fresh agent instance per case, so stateful agents don't leak
+        # plan/step state from one case into the next.
+        harness = Harness(agent=agent_factory(), tools=default_tools, contract=contract)
         result = harness.run(Scenario(name=case["id"], initial_input=case["input"]))
         all_passed &= result.passed
 

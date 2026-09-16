@@ -22,22 +22,52 @@ jobs:
       - name: Run unit tests
         run: pytest tests/ -q
 
+      - name: Restore baseline results (from main's last run)
+        uses: actions/cache/restore@v4
+        with:
+          path: baseline_results.json
+          key: agentguard-baseline-main
+
       - name: Run eval suites against candidate agent
         run: |
           python scripts/run_evals.py --agent customer_support \
-            > candidate_results.json
+            --out candidate_results.json || true
+          # run_evals.py exits non-zero on any FAIL; don't let that abort
+          # the workflow before the regression comparison runs below — a
+          # FAIL that matches the baseline isn't a new regression.
 
-      - name: Fetch baseline results (main branch)
+      - name: Ensure a baseline exists on first-ever run
         run: |
-          # Replace with your artifact store / results DB lookup.
-          # Falls back to an empty baseline if none exists yet.
-          echo "[]" > baseline_results.json
+          if [ ! -f baseline_results.json ]; then
+            echo "No cached baseline found — using this run as the baseline."
+            cp candidate_results.json baseline_results.json
+          fi
 
       - name: Compare against baseline (regression gate)
         run: |
           python scripts/compare_runs.py \
             --baseline baseline_results.json \
             --candidate candidate_results.json
+
+      - name: Update cached baseline (main branch only)
+        if: github.ref == 'refs/heads/main' && success()
+        run: cp candidate_results.json baseline_results.json
+
+      - name: Delete stale baseline cache entry
+        # actions/cache keys are immutable — save silently no-ops if the key
+        # already exists, so the old entry must be deleted first or the
+        # baseline would never actually update after the first run.
+        if: github.ref == 'refs/heads/main' && success()
+        run: gh cache delete agentguard-baseline-main || true
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Save updated baseline to cache (main branch only)
+        if: github.ref == 'refs/heads/main' && success()
+        uses: actions/cache/save@v4
+        with:
+          path: baseline_results.json
+          key: agentguard-baseline-main
 
       - name: Upload run artifacts
         if: always()

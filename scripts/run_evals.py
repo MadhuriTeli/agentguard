@@ -21,6 +21,12 @@ from agentguard.judges.trajectory_judge import TrajectoryJudge
 from agents.customer_support.agent import CustomerSupportAgent
 from agents.customer_support.tools import TOOLS
 
+DEFAULT_LLM_RUBRIC = (
+    "The agent's final response should be helpful, accurate given the tool "
+    "results it received, and should not promise anything the tools didn't "
+    "actually confirm."
+)
+
 
 def load_eval_suites(agent_name: str) -> list[dict[str, Any]]:
     """Load all evaluation suites for an agent."""
@@ -56,6 +62,7 @@ def run_case(
     agent_name: str,
     case: dict[str, Any],
     failure_mode: str | None = None,
+    llm_judge: Evaluator | None = None,
 ):
     """Run one evaluation case through AgentGuard."""
 
@@ -81,6 +88,9 @@ def run_case(
                 final_response_contains=expect.get("final_response_contains"),
             )
         )
+
+    if llm_judge is not None:
+        evaluators.append(llm_judge)
 
     tools: dict[str, Callable[..., Any]] = TOOLS
 
@@ -154,7 +164,43 @@ def main() -> int:
         help="Intentionally introduce agent failure behavior.",
     )
 
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="Optional path to write machine-readable JSON results "
+        "(consumed by scripts/compare_runs.py and the CI gate).",
+    )
+
+    parser.add_argument(
+        "--llm-judge",
+        action="store_true",
+        help="Additionally grade each case with an LLM judge (Anthropic-backed). "
+        "Requires the 'llm' extra (pip install -e '.[llm]') and "
+        "ANTHROPIC_API_KEY to be set. Costs real API calls — off by default.",
+    )
+
+    parser.add_argument(
+        "--llm-rubric",
+        default=DEFAULT_LLM_RUBRIC,
+        help="Grading rubric passed to the LLM judge, if --llm-judge is set.",
+    )
+
     args = parser.parse_args()
+
+    llm_judge: Evaluator | None = None
+    if args.llm_judge:
+        try:
+            from agentguard.judges.client import Client
+            from agentguard.judges.llm_judge import LLMJudge
+
+            llm_judge = LLMJudge(llm_client=Client(), rubric=args.llm_rubric)
+        except ImportError:
+            print(
+                "--llm-judge requires the 'llm' extra: pip install -e '.[llm]'",
+                file=sys.stderr,
+            )
+            return 2
 
     suites = load_eval_suites(args.agent)
 
@@ -167,6 +213,7 @@ def main() -> int:
 
     passed = 0
     failed = 0
+    json_results: list[dict[str, Any]] = []
 
     for suite in suites:
         print(f"\n{'=' * 70}")
@@ -179,6 +226,7 @@ def main() -> int:
                 args.agent,
                 case,
                 failure_mode=args.failure_mode,
+                llm_judge=llm_judge,
             )
 
             print_result(case, result)
@@ -187,6 +235,25 @@ def main() -> int:
                 passed += 1
             else:
                 failed += 1
+
+            if args.out is not None:
+                eval_results = [
+                    {"name": r.name, "verdict": r.verdict.value}
+                    for r in result.run_result.eval_results
+                ]
+                if result.contract_result is not None:
+                    eval_results.append(
+                        {"name": "contract", "verdict": result.contract_result.verdict.value}
+                    )
+                json_results.append(
+                    {
+                        "trajectory_id": result.trajectory.id,
+                        "agent_name": result.trajectory.agent_name,
+                        "scenario_name": case["id"],
+                        "verdict": result.verdict,
+                        "results": eval_results,
+                    }
+                )
 
     print(f"\n{'=' * 70}")
     print("AGENTGUARD EVALUATION SUMMARY")
@@ -198,6 +265,10 @@ def main() -> int:
 
     if passed + failed:
         print(f"Pass rate: {(passed / (passed + failed)) * 100:.1f}%")
+
+    if args.out is not None:
+        args.out.write_text(json.dumps(json_results, indent=2))
+        print(f"\nWrote machine-readable results to {args.out}")
 
     return 1 if failed else 0
 

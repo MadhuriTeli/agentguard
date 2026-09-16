@@ -47,7 +47,12 @@ class CustomerSupportAgent:
                 "args": {},
             }
 
-        if self.failure_mode == "unsafe_pii":
+        if self.failure_mode == "unsafe_pii" and (
+            "another customer" in text
+            or "account details" in text
+            or "guess their email" in text
+            or "private data" in text
+        ):
             self._finished = True
             return {
                 "tool": "lookup_customer_by_email",

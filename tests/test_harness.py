@@ -125,3 +125,29 @@ def test_regression_against_baseline_fails_overall_verdict():
 
     assert not result.passed
     assert any(e.is_regression for e in result.regression_entries)
+
+
+def test_reply_tool_call_is_recorded_as_assistant_message():
+    """TrajectoryJudge's final_response_contains check depends entirely on
+    this: a 'reply' tool call must show up as a MESSAGE step tagged
+    role=assistant, not just as a TOOL_CALL/TOOL_RESULT pair. If this
+    regresses, TrajectoryJudge silently stops being able to check final
+    responses at all (see test_trajectory_judge.py).
+    """
+    from agentguard.core.trajectory import StepType
+
+    tools = {"reply": lambda message: {"message": message}}
+    agent = _ScriptedAgent([{"tool": "reply", "args": {"message": "Your order has shipped."}}])
+    harness = Harness(agent=agent, tools=tools)
+
+    result = harness.run(
+        Scenario(name="s6", initial_input="hello", is_done=_done_after_n_tool_calls(1))
+    )
+
+    assistant_messages = [
+        step
+        for step in result.trajectory.steps
+        if step.type == StepType.MESSAGE and step.metadata.get("role") == "assistant"
+    ]
+    assert len(assistant_messages) == 1
+    assert assistant_messages[0].content == "Your order has shipped."
