@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Optional, Protocol
+from typing import Any, Protocol
 
 from agentguard.contracts.schema import Contract
 from agentguard.core.evaluator import Evaluator
@@ -43,7 +43,7 @@ class LLMJudge(Evaluator):
     name: str = "llm_judge"
 
     def evaluate(
-        self, trajectory: Trajectory, contract: Optional[Contract] = None
+        self, trajectory: Trajectory, contract: Contract | None = None
     ) -> EvalResult:
         rubric = self.rubric
         if contract and contract.description:

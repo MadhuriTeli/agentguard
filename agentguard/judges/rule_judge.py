@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Optional
 
 from agentguard.contracts.schema import Contract
 from agentguard.core.evaluator import Evaluator
@@ -25,7 +24,7 @@ class RuleJudge(Evaluator):
     forbidden_patterns: list[str] = field(default_factory=list)
 
     def evaluate(
-        self, trajectory: Trajectory, contract: Optional[Contract] = None
+        self, trajectory: Trajectory, contract: Contract | None = None
     ) -> EvalResult:
         patterns = list(self.forbidden_patterns)
         if contract:

@@ -8,7 +8,6 @@ live in agentguard.judges (llm_judge, rule_judge) or can be defined by users.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Optional
 
 from agentguard.contracts.schema import Contract
 from agentguard.core.result import EvalResult, RunResult
@@ -22,7 +21,7 @@ class Evaluator(ABC):
 
     @abstractmethod
     def evaluate(
-        self, trajectory: Trajectory, contract: Optional[Contract] = None
+        self, trajectory: Trajectory, contract: Contract | None = None
     ) -> EvalResult:
         """Score a single trajectory, optionally against a contract."""
         raise NotImplementedError
@@ -35,7 +34,7 @@ class EvaluationPipeline:
         self.evaluators = evaluators
 
     def run(
-        self, trajectory: Trajectory, contract: Optional[Contract] = None
+        self, trajectory: Trajectory, contract: Contract | None = None
     ) -> RunResult:
         results = [ev.evaluate(trajectory, contract) for ev in self.evaluators]
         return RunResult(

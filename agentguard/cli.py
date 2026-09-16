@@ -1,5 +1,5 @@
 """Command-line interface for AgentGuard."""
-
+# ruff: noqa: B008
 from __future__ import annotations
 
 import importlib

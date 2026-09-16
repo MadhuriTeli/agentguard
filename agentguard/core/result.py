@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
 
 class Verdict(str, Enum):
@@ -20,7 +20,7 @@ class EvalResult:
 
     name: str
     verdict: Verdict
-    score: Optional[float] = None
+    score: float | None = None
     reason: str = ""
     details: dict[str, Any] = field(default_factory=dict)
 

@@ -1,6 +1,8 @@
 """Tools used by the demo customer-support agent."""
-
 from __future__ import annotations
+
+from collections.abc import Callable
+from typing import Any
 
 
 def lookup_policy(topic: str = "returns") -> dict:
@@ -85,7 +87,7 @@ def reply(message: str) -> dict:
     }
 
 
-TOOLS = {
+TOOLS: dict[str, Callable[..., Any]] = {
     "lookup_policy": lookup_policy,
     "lookup_order": lookup_order,
     "lookup_customer_by_email": lookup_customer_by_email,

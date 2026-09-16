@@ -11,7 +11,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
 
 class StepType(str, Enum):
@@ -39,10 +39,11 @@ class Trajectory:
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     agent_name: str = ""
     scenario_name: str = ""
+    initial_input: Any = None
     steps: list[Step] = field(default_factory=list)
     started_at: float = field(default_factory=time.time)
-    ended_at: Optional[float] = None
-    success: Optional[bool] = None
+    ended_at: float | None = None
+    success: bool | None = None
 
     def add_step(self, step_type: StepType, content: Any, **metadata: Any) -> Step:
         step = Step(type=step_type, content=content, metadata=metadata)
@@ -54,7 +55,7 @@ class Trajectory:
         self.success = success
 
     @property
-    def duration_seconds(self) -> Optional[float]:
+    def duration_seconds(self) -> float | None:
         if self.ended_at is None:
             return None
         return self.ended_at - self.started_at

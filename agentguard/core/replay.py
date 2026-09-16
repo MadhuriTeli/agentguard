@@ -9,10 +9,15 @@ replays it.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
-from agentguard.core.runner import Runner, Scenario
+from agentguard.chaos.engine import ChaosEngine
+from agentguard.contracts.schema import Contract
+from agentguard.core.evaluator import Evaluator
+from agentguard.core.harness import Harness
+from agentguard.core.runner import Scenario
 from agentguard.core.trajectory import StepType, Trajectory
 
 
@@ -35,26 +40,24 @@ class ReplayResult:
     def reproduced_failure(self) -> bool:
         """True if the replay still fails the same way the original did."""
         return (
-            self.original_trajectory.success is False
-            and self.replayed_trajectory.success is False
+            self.original_trajectory.success is False and self.replayed_trajectory.success is False
         )
 
     @property
     def fixed(self) -> bool:
         """True if a previously-failing trajectory now passes on replay."""
         return (
-            self.original_trajectory.success is False
-            and self.replayed_trajectory.success is True
+            self.original_trajectory.success is False and self.replayed_trajectory.success is True
         )
 
 
-class DeterministicFaultSchedule:
+class DeterministicFaultSchedule(ChaosEngine):
     """A fault "engine" that replays a fixed, recorded sequence of faults
     instead of sampling randomly, so a replay run hits faults at exactly
     the same points as the original.
     """
 
-    def __init__(self, recorded_faults: list[Optional[dict]]):
+    def __init__(self, recorded_faults: list[dict | None]):
         self._faults = list(recorded_faults)
         self._index = 0
 
@@ -69,7 +72,7 @@ class DeterministicFaultSchedule:
         return fault.get("mutated", observation)
 
     @classmethod
-    def from_trajectory(cls, trajectory: Trajectory) -> "DeterministicFaultSchedule":
+    def from_trajectory(cls, trajectory: Trajectory) -> DeterministicFaultSchedule:
         recorded = [
             step.content if step.type == StepType.FAULT_INJECTED else None
             for step in trajectory.steps
@@ -80,23 +83,38 @@ class DeterministicFaultSchedule:
 class ReplaySession:
     """Replays a previously recorded failing Trajectory against an agent."""
 
-    def __init__(self, agent: Any):
+    def __init__(
+        self,
+        agent: Any,
+        tools: dict[str, Callable[..., Any]],
+        contract: Contract | None = None,
+        evaluators: list[Evaluator] | None = None,
+    ) -> None:
         self.agent = agent
+        self.tools = tools
+        self.contract = contract
+        self.evaluators = evaluators or []
 
     def replay(self, original: Trajectory) -> ReplayResult:
         fault_schedule = DeterministicFaultSchedule.from_trajectory(original)
-        runner = Runner(agent=self.agent, chaos_engine=fault_schedule)  # type: ignore[arg-type]
 
-        first_message = next(
-            (s.content for s in original.steps if s.type == StepType.MESSAGE), None
+        harness = Harness(
+            agent=self.agent,
+            tools=self.tools,
+            contract=self.contract,
+            chaos_engine=fault_schedule,
+            evaluators=self.evaluators,
         )
+
         scenario = Scenario(
             name=f"replay::{original.scenario_name}",
-            initial_input=first_message,
+            initial_input=original.initial_input,
             max_steps=max(len(original.tool_calls()), 1) + 5,
         )
 
-        replayed = runner.run(scenario)
+        result = harness.run(scenario)
+
+        replayed = result.trajectory
         divergences = self._diff(original, replayed)
 
         return ReplayResult(

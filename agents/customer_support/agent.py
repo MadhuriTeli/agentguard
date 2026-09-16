@@ -9,17 +9,67 @@ from typing import Any
 class CustomerSupportAgent:
     name = "customer_support_agent"
 
-    def __init__(self, llm_client: Any = None):
+    def __init__(
+        self,
+        llm_client: Any = None,
+        failure_mode: str | None = None,
+    ) -> None:
         self.llm_client = llm_client
+        self.failure_mode = failure_mode
         self._last_tool: str | None = None
-        self._finished = False
+        self._finished: bool = False
 
-    def step(self, observation: Any) -> dict:
-        """Choose the next tool call from the current observation."""
+    def _failure_response(self, text: str) -> dict[str, Any] | None:
+        """Return an intentionally bad action when failure injection is enabled."""
 
-        # ---------------------------------------------------------
-        # After a completed operation, produce the final response.
-        # ---------------------------------------------------------
+        if self.failure_mode == "wrong_order_id" and "order" in text:
+            self._last_tool = "lookup_order"
+            return {
+                "tool": "lookup_order",
+                "args": {
+                    "order_id": "99999",
+                },
+            }
+
+        if self.failure_mode == "wrong_tool" and "order" in text:
+            self._last_tool = "lookup_policy"
+            return {
+                "tool": "lookup_policy",
+                "args": {
+                    "topic": "returns",
+                },
+            }
+
+        if self.failure_mode == "skip_confirmation" and "cancel" in text:
+            self._last_tool = "cancel_subscription"
+            return {
+                "tool": "cancel_subscription",
+                "args": {},
+            }
+
+        if self.failure_mode == "unsafe_pii":
+            self._finished = True
+            return {
+                "tool": "lookup_customer_by_email",
+                "args": {
+                    "email": "victim@example.com",
+                },
+            }
+
+        if self.failure_mode == "wrong_response":
+            self._finished = True
+            return {
+                "tool": "reply",
+                "args": {
+                    "message": "I don't know the answer.",
+                },
+            }
+
+        return None
+
+    def step(self, observation: Any) -> dict[str, Any]:
+        """Choose the next tool call based on the current observation."""
+
         if self._finished:
             return {
                 "tool": "reply",
@@ -30,12 +80,14 @@ class CustomerSupportAgent:
 
         text = self._extract_text(observation).lower()
 
-        # ---------------------------------------------------------
-        # Continue a return-policy lookup
-        # ---------------------------------------------------------
+        # Intentionally inject a bad behavior when requested.
+        failure = self._failure_response(text)
+
+        if failure is not None:
+            return failure
+
         if self._last_tool == "lookup_policy":
             self._finished = True
-
             return {
                 "tool": "reply",
                 "args": {
@@ -43,12 +95,8 @@ class CustomerSupportAgent:
                 },
             }
 
-        # ---------------------------------------------------------
-        # Continue an order lookup
-        # ---------------------------------------------------------
         if self._last_tool == "lookup_order":
             self._finished = True
-
             return {
                 "tool": "reply",
                 "args": {
@@ -56,12 +104,8 @@ class CustomerSupportAgent:
                 },
             }
 
-        # ---------------------------------------------------------
-        # Continue after identity verification
-        # ---------------------------------------------------------
         if self._last_tool == "verify_identity":
             self._finished = True
-
             return {
                 "tool": "reply",
                 "args": {
@@ -72,23 +116,15 @@ class CustomerSupportAgent:
                 },
             }
 
-        # ---------------------------------------------------------
-        # Continue after confirmation
-        # ---------------------------------------------------------
         if self._last_tool == "confirm_with_user":
             self._last_tool = "cancel_subscription"
-
             return {
                 "tool": "cancel_subscription",
                 "args": {},
             }
 
-        # ---------------------------------------------------------
-        # Continue after cancellation
-        # ---------------------------------------------------------
         if self._last_tool == "cancel_subscription":
             self._finished = True
-
             return {
                 "tool": "reply",
                 "args": {
@@ -96,9 +132,6 @@ class CustomerSupportAgent:
                 },
             }
 
-        # ---------------------------------------------------------
-        # PII request
-        # ---------------------------------------------------------
         if (
             "another customer" in text
             or "account details" in text
@@ -106,7 +139,6 @@ class CustomerSupportAgent:
             or "private data" in text
         ):
             self._finished = True
-
             return {
                 "tool": "reply",
                 "args": {
@@ -117,12 +149,8 @@ class CustomerSupportAgent:
                 },
             }
 
-        # ---------------------------------------------------------
-        # Return policy
-        # ---------------------------------------------------------
         if "return policy" in text or "return" in text:
             self._last_tool = "lookup_policy"
-
             return {
                 "tool": "lookup_policy",
                 "args": {
@@ -130,14 +158,7 @@ class CustomerSupportAgent:
                 },
             }
 
-        # ---------------------------------------------------------
-        # Order status
-        # ---------------------------------------------------------
-        if "order" in text and (
-            "status" in text
-            or "arrived" in text
-            or "where is" in text
-        ):
+        if "order" in text and ("status" in text or "arrived" in text or "where is" in text):
             match = re.search(r"#?(\d{5,})", text)
             order_id = match.group(1) if match else "unknown"
 
@@ -150,40 +171,26 @@ class CustomerSupportAgent:
                 },
             }
 
-        # ---------------------------------------------------------
-        # Refund
-        # ---------------------------------------------------------
         if "refund" in text:
             self._last_tool = "verify_identity"
-
             return {
                 "tool": "verify_identity",
                 "args": {},
             }
 
-        # ---------------------------------------------------------
-        # Subscription cancellation
-        # ---------------------------------------------------------
         if "cancel" in text and "subscription" in text:
             self._last_tool = "confirm_with_user"
-
             return {
                 "tool": "confirm_with_user",
                 "args": {},
             }
 
-        # ---------------------------------------------------------
-        # Fallback
-        # ---------------------------------------------------------
         self._finished = True
 
         return {
             "tool": "reply",
             "args": {
-                "message": (
-                    "I can help with orders, returns, refunds, "
-                    "and subscription requests."
-                ),
+                "message": ("I can help with orders, returns, refunds, and subscription requests."),
             },
         }
 
@@ -214,10 +221,7 @@ class CustomerSupportAgent:
                 eta = observation.get("eta")
 
                 if eta:
-                    return (
-                        f"Your order is {status}. "
-                        f"The estimated delivery is {eta}."
-                    )
+                    return f"Your order is {status}. The estimated delivery is {eta}."
 
                 return f"Your order status is {status}."
 

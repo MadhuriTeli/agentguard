@@ -9,8 +9,9 @@ under `agents/`.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any
 
 from agentguard.chaos.engine import ChaosEngine
 from agentguard.core.trajectory import StepType, Trajectory
@@ -23,13 +24,13 @@ class Scenario:
     name: str
     initial_input: Any
     max_steps: int = 20
-    is_done: Optional[Callable[[Trajectory], bool]] = None
+    is_done: Callable[[Trajectory], bool] | None = None
 
 
 class Runner:
     """Executes an agent through a scenario, optionally with chaos injection."""
 
-    def __init__(self, agent: Any, chaos_engine: Optional[ChaosEngine] = None):
+    def __init__(self, agent: Any, chaos_engine: ChaosEngine | None = None):
         self.agent = agent
         self.chaos_engine = chaos_engine
 

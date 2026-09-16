@@ -24,8 +24,9 @@ most users will actually reach for.
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any
 
 from agentguard.chaos.engine import ChaosEngine
 from agentguard.contracts.schema import Contract
@@ -49,7 +50,7 @@ class ContractViolation(Exception):
 class HarnessMetrics:
     """Quantitative summary of a single harness run."""
 
-    duration_seconds: Optional[float]
+    duration_seconds: float | None
     num_steps: int
     num_tool_calls: int
     tool_call_counts: dict[str, int]
@@ -73,7 +74,7 @@ class HarnessResult:
 
     trajectory: Trajectory
     run_result: RunResult
-    contract_result: Optional[EvalResult]
+    contract_result: EvalResult | None
     metrics: HarnessMetrics
     regression_entries: list[RegressionEntry] = field(default_factory=list)
 
@@ -140,10 +141,10 @@ class Harness:
         self,
         agent: Any,
         tools: dict[str, Callable[..., Any]],
-        contract: Optional[Contract] = None,
-        chaos_engine: Optional[ChaosEngine] = None,
-        evaluators: Optional[list[Evaluator]] = None,
-        baseline: Optional[RunResult] = None,
+        contract: Contract | None = None,
+        chaos_engine: ChaosEngine | None = None,
+        evaluators: list[Evaluator] | None = None,
+        baseline: RunResult | None = None,
     ):
         self.agent = agent
         self.contract = contract
@@ -153,7 +154,7 @@ class Harness:
 
         self._tool_call_counts: Counter[str] = Counter()
         self._live_violations: list[str] = []
-        self._trajectory: Optional[Trajectory] = None
+        self._trajectory: Trajectory | None = None
 
         self.tools = {name: self._intercept(name, fn) for name, fn in tools.items()}
 
@@ -169,7 +170,7 @@ class Harness:
 
             try:
                 result = fn(**kwargs)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 trajectory.add_step(StepType.ERROR, f"{name} raised: {exc}")
                 raise
 
@@ -229,6 +230,7 @@ class Harness:
         trajectory = Trajectory(
             agent_name=getattr(self.agent, "name", self.agent.__class__.__name__),
             scenario_name=scenario.name,
+            initial_input=scenario.initial_input,
         )
         self._trajectory = trajectory
 
@@ -281,7 +283,7 @@ class Harness:
 
     # -- post-run steps -----------------------------------------------------
 
-    def _evaluate_contract(self, trajectory: Trajectory) -> Optional[EvalResult]:
+    def _evaluate_contract(self, trajectory: Trajectory) -> EvalResult | None:
         if self.contract is None:
             return None
 
