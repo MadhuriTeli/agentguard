@@ -1,0 +1,132 @@
+from agentguard.contracts.schema import Contract
+from agentguard.core.harness import Harness, HarnessResult
+from agentguard.core.runner import Scenario
+from agentguard.regression.metrics import MetricsComparator, SuiteMetrics
+
+
+class _ScriptedAgent:
+    def __init__(self, actions: list[dict]):
+        self._actions = list(actions)
+
+    def step(self, observation):
+        return self._actions.pop(0) if self._actions else {"tool": "reply", "args": {}}
+
+
+def _run(actions: list[dict], tools: dict, contract=None, evaluators=None) -> HarnessResult:
+    num_actions = len(actions)
+    harness = Harness(
+        agent=_ScriptedAgent(actions), tools=tools, contract=contract, evaluators=evaluators
+    )
+    scenario = Scenario(
+        name="s",
+        initial_input="hi",
+        is_done=lambda trajectory: len(trajectory.tool_calls()) >= num_actions,
+    )
+    return harness.run(scenario)
+
+
+def _passing_run():
+    tools = {"reply": lambda **kw: kw}
+    return _run([{"tool": "reply", "args": {"message": "ok"}}], tools)
+
+
+def _failing_run_forbidden_tool():
+    tools = {"reply": lambda **kw: kw, "issue_refund": lambda **kw: kw}
+    contract = Contract(name="c", forbidden_tools=["issue_refund"])
+    return _run([{"tool": "issue_refund", "args": {"amount": 5}}], tools, contract=contract)
+
+
+def test_suite_metrics_from_empty_runs():
+    metrics = SuiteMetrics.from_runs([])
+    assert metrics.num_scenarios == 0
+    assert metrics.pass_rate == 0.0
+
+
+def test_suite_metrics_pass_rate_and_counts():
+    runs = [_passing_run(), _passing_run(), _failing_run_forbidden_tool()]
+    metrics = SuiteMetrics.from_runs(runs)
+
+    assert metrics.num_scenarios == 3
+    assert metrics.num_passed == 2
+    assert metrics.pass_rate == 2 / 3
+    assert metrics.contract_failures == 1
+    assert metrics.safety_failures == 0
+
+
+def test_metrics_comparator_detects_pass_rate_regression():
+    baseline = [_passing_run(), _passing_run()]
+    candidate = [_passing_run(), _failing_run_forbidden_tool()]
+
+    report = MetricsComparator().compare(baseline, candidate)
+
+    assert report.has_regressions
+    regressed_metrics = {m.metric_name for m in report.regressions}
+    assert "pass_rate" in regressed_metrics
+    assert "contract_failures" in regressed_metrics
+
+
+def test_metrics_comparator_no_regression_when_identical():
+    runs = [_passing_run(), _passing_run()]
+    report = MetricsComparator().compare(runs, runs)
+
+    assert not report.has_regressions
+
+
+def test_metrics_comparator_detects_increased_tool_calls():
+    tools = {"reply": lambda **kw: kw, "lookup_order": lambda **kw: kw}
+    baseline = [_run([{"tool": "reply", "args": {}}], tools)]
+    candidate = [
+        _run(
+            [
+                {"tool": "lookup_order", "args": {"order_id": "1"}},
+                {"tool": "lookup_order", "args": {"order_id": "1"}},
+                {"tool": "reply", "args": {}},
+            ],
+            tools,
+        )
+    ]
+
+    report = MetricsComparator().compare(baseline, candidate)
+
+    tool_call_regression = next(
+        m for m in report.metric_regressions if m.metric_name == "avg_tool_calls"
+    )
+    assert tool_call_regression.is_regression
+    assert tool_call_regression.delta == 2  # 3 calls vs 1
+
+
+def test_metrics_comparator_respects_custom_threshold():
+    tools = {"reply": lambda **kw: kw, "lookup_order": lambda **kw: kw}
+    baseline = [_run([{"tool": "reply", "args": {}}], tools)]
+    candidate = [
+        _run(
+            [{"tool": "lookup_order", "args": {"order_id": "1"}}, {"tool": "reply", "args": {}}],
+            tools,
+        )
+    ]
+
+    # One extra tool call, but threshold allows up to 5 extra — not a regression.
+    lenient = MetricsComparator(tool_call_increase_threshold=5)
+    report = lenient.compare(baseline, candidate)
+    assert not report.has_regressions
+
+    strict = MetricsComparator(tool_call_increase_threshold=0)
+    report = strict.compare(baseline, candidate)
+    assert report.has_regressions
+
+
+def test_default_latency_threshold_absorbs_measurement_noise():
+    """Two near-instant runs will never take EXACTLY the same wall-clock
+    time. A zero-tolerance latency threshold would flag that noise as a
+    regression on every single comparison — the default must not do that.
+    """
+    tools = {"reply": lambda **kw: kw}
+    baseline = [_run([{"tool": "reply", "args": {}}], tools)]
+    candidate = [_run([{"tool": "reply", "args": {}}], tools)]
+
+    report = MetricsComparator().compare(baseline, candidate)  # default threshold
+
+    latency_regression = next(
+        m for m in report.metric_regressions if m.metric_name == "avg_duration_seconds"
+    )
+    assert not latency_regression.is_regression

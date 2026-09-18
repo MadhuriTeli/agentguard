@@ -1,5 +1,5 @@
 from agentguard.contracts.schema import Contract
-from agentguard.core.result import Verdict
+from agentguard.core.result import FailureType, Verdict
 from agentguard.core.trajectory import StepType, Trajectory
 from agentguard.judges.llm_judge import LLMJudge
 
@@ -120,3 +120,29 @@ def test_missing_reason_defaults_to_empty_string():
 
     assert result.verdict == Verdict.PASS
     assert result.reason == ""
+
+
+def test_fail_verdict_carries_evidence():
+    client = _StubClient('{"verdict": "fail", "reason": "Leaked a customer email"}')
+    result = LLMJudge(llm_client=client).evaluate(_make_trajectory())
+
+    assert len(result.evidence) == 1
+    assert result.evidence[0].message == "Leaked a customer email"
+    assert result.failure_types == [FailureType.WRONG_FINAL_ANSWER]
+
+
+def test_pass_verdict_carries_no_evidence():
+    client = _StubClient('{"verdict": "pass", "reason": "Looks good"}')
+    result = LLMJudge(llm_client=client).evaluate(_make_trajectory())
+
+    assert result.evidence == []
+
+
+def test_error_verdict_carries_no_evidence():
+    """A malformed response is a judge malfunction, not a classified
+    behavior failure — it shouldn't show up in a failure-type report."""
+    client = _StubClient("not json at all")
+    result = LLMJudge(llm_client=client).evaluate(_make_trajectory())
+
+    assert result.verdict == Verdict.ERROR
+    assert result.evidence == []

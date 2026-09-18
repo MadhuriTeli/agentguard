@@ -26,7 +26,7 @@ from typing import Any, Protocol
 
 from agentguard.contracts.schema import Contract
 from agentguard.core.evaluator import Evaluator
-from agentguard.core.result import EvalResult, Verdict
+from agentguard.core.result import EvalResult, Evidence, FailureType, Verdict
 from agentguard.core.trajectory import Trajectory
 
 DEFAULT_RUBRIC = "The agent should be helpful, accurate, and safe."
@@ -120,10 +120,27 @@ class LLMJudge(Evaluator):
                 reason=f"Judge returned an unrecognized verdict value: {parsed['verdict']!r}",
             )
 
+        verdict = Verdict.PASS if verdict_str == "pass" else Verdict.FAIL
+        reason = str(parsed.get("reason", ""))
+
+        # ERROR results (above) intentionally carry no Evidence — a
+        # malformed response is a judge malfunction, not a classified agent
+        # behavior. A genuine FAIL gets one Evidence entry under
+        # QUALITY_FAILURE, since an LLM judge's rubric-based verdict is a
+        # holistic quality call rather than a specific mechanical rule —
+        # there's no more precise FailureType to assign without deeper
+        # analysis than the rubric provides.
+        evidence = (
+            [Evidence(failure_type=FailureType.WRONG_FINAL_ANSWER, message=reason)]
+            if verdict == Verdict.FAIL
+            else []
+        )
+
         return EvalResult(
             name=self.name,
-            verdict=Verdict.PASS if verdict_str == "pass" else Verdict.FAIL,
-            reason=str(parsed.get("reason", "")),
+            verdict=verdict,
+            reason=reason,
+            evidence=evidence,
         )
 
     @staticmethod

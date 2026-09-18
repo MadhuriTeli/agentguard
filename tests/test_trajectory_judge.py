@@ -1,4 +1,4 @@
-from agentguard.core.result import Verdict
+from agentguard.core.result import FailureType, Verdict
 from agentguard.core.trajectory import StepType, Trajectory
 from agentguard.judges.trajectory_judge import TrajectoryJudge
 
@@ -151,3 +151,65 @@ def test_ignores_user_messages_when_finding_final_response():
     result = judge.evaluate(traj)
 
     assert result.verdict == Verdict.FAIL
+
+
+# ---------------------------------------------------------------------------
+# Failure classification
+# ---------------------------------------------------------------------------
+
+
+def test_wrong_tool_at_position_is_classified_as_wrong_tool():
+    judge = TrajectoryJudge(expected_tool_calls=[{"tool": "verify_identity", "args": {}}])
+    traj = _trajectory_with([{"tool": "issue_refund", "args": {"amount": 100}}])
+
+    result = judge.evaluate(traj)
+
+    assert result.failure_types == [FailureType.WRONG_TOOL]
+    assert result.evidence[0].expected == "verify_identity"
+    assert result.evidence[0].actual == "issue_refund"
+
+
+def test_wrong_argument_is_classified_as_wrong_argument_not_wrong_tool():
+    judge = TrajectoryJudge(
+        expected_tool_calls=[{"tool": "lookup_order", "args": {"order_id": "123"}}]
+    )
+    traj = _trajectory_with([{"tool": "lookup_order", "args": {"order_id": "999"}}])
+
+    result = judge.evaluate(traj)
+
+    assert result.failure_types == [FailureType.WRONG_ARGUMENT]
+
+
+def test_too_few_tool_calls_is_classified_as_premature_termination():
+    judge = TrajectoryJudge(
+        expected_tool_calls=[
+            {"tool": "confirm_with_user", "args": {}},
+            {"tool": "cancel_subscription", "args": {}},
+        ]
+    )
+    traj = _trajectory_with([{"tool": "confirm_with_user", "args": {}}])
+
+    result = judge.evaluate(traj)
+
+    assert FailureType.PREMATURE_TERMINATION in result.failure_types
+
+
+def test_missing_final_response_text_with_no_reply_at_all_is_incomplete_response():
+    """No assistant message exists at all — that's a different fact than
+    'the agent replied, but said the wrong thing'.
+    """
+    judge = TrajectoryJudge(final_response_contains=["30 days"])
+    traj = _trajectory_with([])  # no final_reply
+
+    result = judge.evaluate(traj)
+
+    assert result.failure_types == [FailureType.INCOMPLETE_RESPONSE]
+
+
+def test_wrong_final_response_text_with_a_reply_present_is_wrong_final_answer():
+    judge = TrajectoryJudge(final_response_contains=["30 days"])
+    traj = _trajectory_with([], final_reply="Your request has been processed.")
+
+    result = judge.evaluate(traj)
+
+    assert result.failure_types == [FailureType.WRONG_FINAL_ANSWER]

@@ -1,6 +1,6 @@
 from agentguard.contracts.schema import Contract, ToolConstraint
 from agentguard.contracts.validator import ContractValidator
-from agentguard.core.result import Verdict
+from agentguard.core.result import FailureType, Verdict
 from agentguard.core.trajectory import StepType, Trajectory
 
 
@@ -119,3 +119,97 @@ def test_empty_required_steps_always_passes():
     result = ContractValidator().validate(traj, contract)
 
     assert result.verdict == Verdict.PASS
+
+
+# ---------------------------------------------------------------------------
+# Failure classification: evidence and failure_type, not just pass/fail
+# ---------------------------------------------------------------------------
+
+
+def test_forbidden_tool_produces_forbidden_tool_evidence():
+    contract = Contract(name="c10", forbidden_tools=["issue_refund"])
+    traj = make_trajectory_with_tool_calls(["issue_refund"])
+
+    result = ContractValidator().validate(traj, contract)
+
+    assert FailureType.FORBIDDEN_TOOL in result.failure_types
+    ev = result.evidence[0]
+    assert ev.actual == "issue_refund"
+
+
+def test_max_calls_exceeded_produces_max_calls_exceeded_evidence():
+    contract = Contract(
+        name="c11",
+        tool_constraints=[ToolConstraint(tool_name="lookup_order", max_calls=1)],
+    )
+    traj = make_trajectory_with_tool_calls(["lookup_order", "lookup_order"])
+
+    result = ContractValidator().validate(traj, contract)
+
+    assert result.failure_types == [FailureType.MAX_CALLS_EXCEEDED]
+    assert result.evidence[0].expected == "<= 1 calls"
+    assert result.evidence[0].actual == "2 calls"
+
+
+def test_required_step_never_called_is_missing_not_ordering():
+    """A step that never appears at all is a different, more basic fact
+    than a step that appears too late — MISSING_REQUIRED_STEP, not
+    ORDERING_VIOLATION.
+    """
+    contract = Contract(name="c12", required_steps=["verify_identity"])
+    traj = make_trajectory_with_tool_calls(["lookup_order", "reply"])
+
+    result = ContractValidator().validate(traj, contract)
+
+    assert result.failure_types == [FailureType.MISSING_REQUIRED_STEP]
+
+
+def test_required_step_called_out_of_order_is_ordering_not_missing():
+    """verify_identity DID happen, just after issue_refund rather than
+    before it — this is an ordering fact, not an absence fact, and a
+    developer debugging this needs to know which.
+    """
+    contract = Contract(name="c13", required_steps=["verify_identity", "issue_refund"])
+    traj = make_trajectory_with_tool_calls(["issue_refund", "verify_identity"])
+
+    result = ContractValidator().validate(traj, contract)
+
+    assert result.failure_types == [FailureType.ORDERING_VIOLATION]
+
+
+def test_max_turns_exceeded_produces_matching_evidence():
+    contract = Contract(name="c14", max_turns=1)
+    traj = Trajectory(agent_name="a", scenario_name="s")
+    traj.add_step(StepType.MESSAGE, "hi")
+    traj.add_step(StepType.MESSAGE, "there")
+
+    result = ContractValidator().validate(traj, contract)
+
+    assert result.failure_types == [FailureType.MAX_TURNS_EXCEEDED]
+
+
+def test_passing_contract_has_no_evidence():
+    contract = Contract(name="c15", allowed_tools=["reply"])
+    traj = make_trajectory_with_tool_calls(["reply"])
+
+    result = ContractValidator().validate(traj, contract)
+
+    assert result.evidence == []
+    assert result.primary_failure_type is None
+
+
+def test_multiple_simultaneous_violations_each_get_their_own_evidence():
+    contract = Contract(
+        name="c16",
+        forbidden_tools=["issue_refund"],
+        required_steps=["verify_identity"],
+    )
+    traj = make_trajectory_with_tool_calls(["issue_refund"])
+
+    result = ContractValidator().validate(traj, contract)
+
+    assert set(result.failure_types) == {
+        FailureType.FORBIDDEN_TOOL,
+        FailureType.MISSING_REQUIRED_STEP,
+    }
+    assert len(result.evidence) == 2

@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 from agentguard.contracts.schema import Contract
 from agentguard.core.evaluator import Evaluator
-from agentguard.core.result import EvalResult, Verdict
+from agentguard.core.result import EvalResult, Evidence, FailureType, Verdict
 from agentguard.core.trajectory import StepType, Trajectory
 
 
@@ -23,21 +23,26 @@ class RuleJudge(Evaluator):
     name: str = "rule_judge"
     forbidden_patterns: list[str] = field(default_factory=list)
 
-    def evaluate(
-        self, trajectory: Trajectory, contract: Contract | None = None
-    ) -> EvalResult:
+    def evaluate(self, trajectory: Trajectory, contract: Contract | None = None) -> EvalResult:
         patterns = list(self.forbidden_patterns)
         if contract:
             patterns.extend(contract.forbidden_phrases)
 
-        text_steps = [
-            str(s.content) for s in trajectory.steps if s.type == StepType.MESSAGE
-        ]
+        text_steps = [str(s.content) for s in trajectory.steps if s.type == StepType.MESSAGE]
         full_text = "\n".join(text_steps)
 
         violations = [p for p in patterns if re.search(p, full_text, re.IGNORECASE)]
 
         verdict = Verdict.FAIL if violations else Verdict.PASS
+        evidence = [
+            Evidence(
+                failure_type=FailureType.POLICY_VIOLATION,
+                message=f"Forbidden pattern matched: {pattern!r}",
+                expected="no match for this pattern",
+                actual=full_text,
+            )
+            for pattern in violations
+        ]
         return EvalResult(
             name=self.name,
             verdict=verdict,
@@ -47,4 +52,5 @@ class RuleJudge(Evaluator):
                 else "No forbidden patterns matched"
             ),
             details={"violations": violations},
+            evidence=evidence,
         )

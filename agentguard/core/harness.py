@@ -5,10 +5,13 @@ This is the single entry point that ties every other piece together:
     Agent
       |
     Harness
-      |-- intercept tools       (wraps each tool fn the agent can call)
-      |-- enforce contracts     (blocks forbidden/over-quota calls live)
-      |-- record trajectory     (every call, result, fault, violation)
-      |-- inject failures       (via a ChaosEngine, at the interception point)
+      |-- AgentAdapter          (framework-agnostic: wraps native step()
+      |                          agents automatically; anything else
+      |                          implements AgentAdapter directly)
+      |-- ToolGateway           (contract enforcement, chaos injection,
+      |                          and trajectory recording all happen here,
+      |                          as one fixed pipeline every tool call
+      |                          passes through — see agentguard.tools.gateway)
       |-- evaluate result       (contract validator + judges)
       |-- calculate metrics     (latency, call counts, fault/violation counts)
       \\-- detect regressions    (vs an optional baseline RunResult)
@@ -16,18 +19,19 @@ This is the single entry point that ties every other piece together:
     PASS / FAIL
 
 Where the earlier pieces (Runner, ContractValidator, ChaosEngine,
-EvaluationPipeline, RegressionComparator) are independent building blocks
-you can use standalone, the Harness is the opinionated orchestration layer
-most users will actually reach for.
+EvaluationPipeline, RegressionComparator, ToolGateway) are independent
+building blocks you can use standalone, the Harness is the opinionated
+orchestration layer most users will actually reach for.
 """
 
 from __future__ import annotations
 
-from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from agentguard.adapters.base import AgentAdapter, ExecutionContext
+from agentguard.adapters.native import NativeAgentAdapter
 from agentguard.chaos.engine import ChaosEngine
 from agentguard.contracts.schema import Contract
 from agentguard.contracts.validator import ContractValidator
@@ -36,14 +40,14 @@ from agentguard.core.result import EvalResult, RunResult, Verdict
 from agentguard.core.runner import Scenario
 from agentguard.core.trajectory import StepType, Trajectory
 from agentguard.regression.comparator import RegressionComparator, RegressionEntry
+from agentguard.tools.gateway import ContractViolation, ToolGateway, UnknownToolError
 
-
-class ContractViolation(Exception):
-    """Raised when a live tool call breaks a contract's real-time rules."""
-
-    def __init__(self, message: str):
-        super().__init__(message)
-        self.message = message
+__all__ = [
+    "ContractViolation",
+    "Harness",
+    "HarnessMetrics",
+    "HarnessResult",
+]
 
 
 @dataclass
@@ -95,7 +99,10 @@ class HarnessResult:
             "trajectory_id": self.trajectory.id,
             "scenario_name": self.trajectory.scenario_name,
             "contract": (
-                {"verdict": self.contract_result.verdict.value, "reason": self.contract_result.reason}
+                {
+                    "verdict": self.contract_result.verdict.value,
+                    "reason": self.contract_result.reason,
+                }
                 if self.contract_result
                 else None
             ),
@@ -146,113 +153,55 @@ class Harness:
         evaluators: list[Evaluator] | None = None,
         baseline: RunResult | None = None,
     ):
-        self.agent = agent
+        # Harness never talks to a raw agent object — only to an
+        # AgentAdapter. Anything that isn't already one (i.e. every
+        # existing native step()-style agent) gets auto-wrapped so nothing
+        # that worked before this abstraction existed needs to change.
+        self.adapter: AgentAdapter = (
+            agent if isinstance(agent, AgentAdapter) else NativeAgentAdapter(agent)
+        )
+        self.raw_tools = tools
         self.contract = contract
         self.chaos_engine = chaos_engine
         self.evaluation_pipeline = EvaluationPipeline(evaluators or [])
         self.baseline = baseline
 
-        self._tool_call_counts: Counter[str] = Counter()
-        self._live_violations: list[str] = []
-        self._trajectory: Trajectory | None = None
-
-        self.tools = {name: self._intercept(name, fn) for name, fn in tools.items()}
-
-    # -- tool interception ------------------------------------------------
-
-    def _intercept(self, name: str, fn: Callable[..., Any]) -> Callable[..., Any]:
-        def wrapped(**kwargs: Any) -> Any:
-            assert self._trajectory is not None, "intercepted tool called outside a run"
-            trajectory = self._trajectory
-
-            self._tool_call_counts[name] += 1
-            self._enforce_live(name, trajectory)
-
-            try:
-                result = fn(**kwargs)
-            except Exception as exc:
-                trajectory.add_step(StepType.ERROR, f"{name} raised: {exc}")
-                raise
-
-            if self.chaos_engine is not None:
-                result = self.chaos_engine.maybe_inject(result, trajectory)
-
-            trajectory.add_step(StepType.TOOL_RESULT, result, tool=name)
-
-            # A reply tool represents the agent's user-facing response.
-            # Record it as an assistant MESSAGE so trajectory-level
-            # evaluators can inspect the final response.
-            if name == "reply":
-                message = (
-                    result.get("message", "")
-                    if isinstance(result, dict)
-                    else str(result)
-                )
-
-                trajectory.add_step(
-                    StepType.MESSAGE,
-                    message,
-                    role="assistant",
-                )
-
-            return result
-
-        return wrapped
-
-    def _enforce_live(self, tool_name: str, trajectory: Trajectory) -> None:
-        """Block/record contract violations that are knowable at call time."""
-        if self.contract is None:
-            return
-
-        if self.contract.forbidden_tools and tool_name in self.contract.forbidden_tools:
-            msg = f"Forbidden tool called: {tool_name}"
-            self._live_violations.append(msg)
-            trajectory.add_step(StepType.ERROR, msg, kind="contract_violation")
-            raise ContractViolation(msg)
-
-        for constraint in self.contract.tool_constraints:
-            if constraint.tool_name != tool_name or constraint.max_calls is None:
-                continue
-            if self._tool_call_counts[tool_name] > constraint.max_calls:
-                msg = (
-                    f"Tool '{tool_name}' exceeded max_calls "
-                    f"({self._tool_call_counts[tool_name]} > {constraint.max_calls})"
-                )
-                self._live_violations.append(msg)
-                trajectory.add_step(StepType.ERROR, msg, kind="contract_violation")
-                raise ContractViolation(msg)
+        # Built fresh per run() call — see run() below — so call counts
+        # and live-violation evidence never leak between runs of the same
+        # Harness instance.
+        self.gateway: ToolGateway | None = None
 
     # -- orchestration ------------------------------------------------------
 
     def run(self, scenario: Scenario) -> HarnessResult:
-        self._tool_call_counts = Counter()
-        self._live_violations = []
+        gateway = ToolGateway(self.raw_tools, self.contract, self.chaos_engine)
+        self.gateway = gateway
+
         trajectory = Trajectory(
-            agent_name=getattr(self.agent, "name", self.agent.__class__.__name__),
+            agent_name=self.adapter.name,
             scenario_name=scenario.name,
             initial_input=scenario.initial_input,
         )
-        self._trajectory = trajectory
 
         observation: Any = scenario.initial_input
         trajectory.add_step(StepType.MESSAGE, observation, role="user")
 
         success = False
         try:
-            for _ in range(scenario.max_steps):
-                action = self.agent.step(observation)
+            for step_number in range(scenario.max_steps):
+                context = ExecutionContext(trajectory=trajectory, step_number=step_number)
+                execution = self.adapter.run(observation, context)
+                action = execution.action
                 trajectory.add_step(StepType.TOOL_CALL, action)
 
                 tool_name = action.get("tool") if isinstance(action, dict) else None
                 args = action.get("args", {}) if isinstance(action, dict) else {}
 
-                if tool_name not in self.tools:
-                    trajectory.add_step(
-                        StepType.ERROR, f"Unknown tool requested: {tool_name}"
-                    )
+                if tool_name is None or not gateway.has_tool(tool_name):
+                    trajectory.add_step(StepType.ERROR, f"Unknown tool requested: {tool_name}")
                     break
 
-                observation = self.tools[tool_name](**args)
+                observation = gateway.execute(tool_name, args, trajectory)
 
                 if scenario.is_done and scenario.is_done(trajectory):
                     success = True
@@ -261,16 +210,18 @@ class Harness:
                 success = False
         except ContractViolation:
             success = False
+        except UnknownToolError as exc:
+            trajectory.add_step(StepType.ERROR, f"Unknown tool requested: {exc}")
+            success = False
         except Exception as exc:  # noqa: BLE001
             trajectory.add_step(StepType.ERROR, str(exc))
             success = False
 
-        trajectory.finish(success=success and not self._live_violations)
-        self._trajectory = None
+        trajectory.finish(success=success and not gateway.live_violations)
 
-        contract_result = self._evaluate_contract(trajectory)
+        contract_result = self._evaluate_contract(trajectory, gateway)
         run_result = self.evaluation_pipeline.run(trajectory, self.contract)
-        metrics = self._calculate_metrics(trajectory)
+        metrics = self._calculate_metrics(trajectory, gateway)
         regression_entries = self._detect_regressions(run_result)
 
         return HarnessResult(
@@ -283,34 +234,36 @@ class Harness:
 
     # -- post-run steps -----------------------------------------------------
 
-    def _evaluate_contract(self, trajectory: Trajectory) -> EvalResult | None:
+    def _evaluate_contract(self, trajectory: Trajectory, gateway: ToolGateway) -> EvalResult | None:
         if self.contract is None:
             return None
 
         result = ContractValidator().validate(trajectory, self.contract)
 
-        if self._live_violations:
+        if gateway.live_violations:
+            live_messages = [e.message for e in gateway.live_violations]
             result = EvalResult(
                 name=result.name,
                 verdict=Verdict.FAIL,
-                reason="; ".join(self._live_violations + [result.reason]),
+                reason="; ".join([*live_messages, result.reason]),
                 details={
-                    "live_violations": self._live_violations,
+                    "live_violations": live_messages,
                     **result.details,
                 },
+                evidence=[*gateway.live_violations, *result.evidence],
             )
         return result
 
-    def _calculate_metrics(self, trajectory: Trajectory) -> HarnessMetrics:
+    def _calculate_metrics(self, trajectory: Trajectory, gateway: ToolGateway) -> HarnessMetrics:
         return HarnessMetrics(
             duration_seconds=trajectory.duration_seconds,
             num_steps=len(trajectory.steps),
-            num_tool_calls=sum(self._tool_call_counts.values()),
-            tool_call_counts=dict(self._tool_call_counts),
+            num_tool_calls=sum(gateway.tool_call_counts.values()),
+            tool_call_counts=dict(gateway.tool_call_counts),
             num_faults_injected=sum(
                 1 for s in trajectory.steps if s.type == StepType.FAULT_INJECTED
             ),
-            num_live_violations=len(self._live_violations),
+            num_live_violations=len(gateway.live_violations),
         )
 
     def _detect_regressions(self, run_result: RunResult) -> list[RegressionEntry]:

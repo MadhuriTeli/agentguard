@@ -2,7 +2,7 @@ from agentguard.chaos.engine import ChaosEngine
 from agentguard.chaos.faults import ToolErrorFault
 from agentguard.contracts.schema import Contract, ToolConstraint
 from agentguard.core.harness import Harness
-from agentguard.core.result import EvalResult, RunResult, Verdict
+from agentguard.core.result import EvalResult, FailureType, RunResult, Verdict
 from agentguard.core.runner import Scenario
 
 
@@ -58,6 +58,7 @@ def test_forbidden_tool_is_blocked_live_and_fails():
     # the refund tool must never have actually executed
     assert result.metrics.tool_call_counts.get("issue_refund") == 1
     assert result.metrics.num_live_violations == 1
+    assert result.contract_result.failure_types == [FailureType.FORBIDDEN_TOOL]
 
 
 def test_max_calls_enforced_live():
@@ -80,6 +81,8 @@ def test_max_calls_enforced_live():
     assert not result.passed
     # second call should never have reached the real tool fn
     assert call_log == ["1"]
+    assert result.contract_result is not None
+    assert result.contract_result.failure_types == [FailureType.MAX_CALLS_EXCEEDED]
 
 
 def test_chaos_engine_injects_fault_into_tool_result():
